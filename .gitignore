@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# virtualenvs
+.venv/
+venv/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# generated output
+*.fcpxml

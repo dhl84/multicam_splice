@@ -1,0 +1,29 @@
+{
+  "project_name": "Open 26.1 — warm-up + multicam remix",
+  "event_name": "Open 26.1",
+  "media_dir": "/path/to/your/footage",
+  "output": "open_261_remix.fcpxml",
+
+  "format": {"width": 3840, "height": 2160, "fps_num": 60000, "fps_den": 1001},
+  "reference": "GoPro",
+
+  "angles": {
+    "GoPro":  {"files": ["GX010621.MP4"], "timecode": "08:35:20:49"},
+    "iPhone": {"files": ["IMG_0709.MOV"]},
+    "DJI":    {"files": ["DJI_0475.MP4", "DJI_0476.MP4"]}
+  },
+
+  "segments": [
+    {"type": "intro", "angle": "DJI", "audio": "own"},
+    {"type": "remix",
+     "window": [66.0, 825.0],
+     "angles": ["GoPro", "iPhone"],
+     "audio_bed": "auto",
+     "pattern": [3.5, 5.0, 2.5, 4.0, 6.0, 3.0, 4.5, 2.5, 5.5, 3.5],
+     "tail_single_angle": true}
+  ],
+
+  "transition_seconds": 1.0,
+  "bed_fade_in_seconds": 1.0,
+  "end_fade_seconds": 2.5
+}
