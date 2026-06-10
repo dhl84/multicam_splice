@@ -32,7 +32,12 @@ Given clips from multiple cameras (different makes/mics/start times) it:
      action. Both results are cached to disk (`<first-file-stem>_content_cache.npy`)
      so re-runs are instant.
 6. **Polishes**: cross-dissolves between sections and a fade-to-black (picture +
-   sound) at the end.
+   sound) at the end. A centred dissolve needs half its length of spare media on
+   *both* sides of the cut; where the incoming section starts at the very first
+   frame of its media (no handle to dissolve from) the dissolve is shortened to
+   what the footage allows, or replaced by a clean hard cut. This keeps every
+   transition importable — FCP rejects a dissolve that reaches past a clip's
+   media start with "Encountered an unexpected value."
 7. **Outputs** a DTD-validated FCPXML (`File ▸ Import ▸ XML` makes a new project;
    your media and existing projects are untouched).
 

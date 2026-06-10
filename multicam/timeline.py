@@ -240,9 +240,7 @@ class Builder:
                     cursor += inf.n_frames
 
             elif seg.type == "remix":
-                ws, we = (seg.window if seg.window
-                          else [self.angles[seg.angle or seg.angles[0]].offset,
-                                self._full_end(seg)])
+                ws, we = self._window(seg)
                 shots = self._shots(seg, ws, we)
                 first = None
                 for (aname, t0, t1) in shots:
@@ -274,13 +272,22 @@ class Builder:
                         fade_in_f=bed_in if k == 0 else 0,
                         fade_out_f=bed_out if k == len(flat) - 1 else 0))
 
-            # transition into the NEXT segment: trim this segment's tail for a handle
+            # transition into the NEXT segment.  A centred cross dissolve borrows
+            # D//2 of media from EACH side of the cut: the outgoing handle comes
+            # from the tail we trim here, but the incoming clip must already have
+            # D//2 of media before its in-point or FCP rejects the transition
+            # ("Encountered an unexpected value").  Clamp to what's available; if
+            # the incoming clip starts at its media head (no handle), hard cut.
             if D and not is_last:
                 last = seg_clips[-1]
-                if last.dur_f > D + 2:
-                    last.dur_f -= D
-                    cursor -= D
-                    items.append(fcpxml.Dissolve(tl_off_f=cursor - D // 2, dur_f=D))
+                head = self._head_handle_f(self.p.segments[si + 1])
+                d_eff = min(D, 2 * head)
+                d_eff -= d_eff % 2                     # keep d_eff//2 exact
+                if d_eff >= 2 and last.dur_f > d_eff + 2:
+                    last.dur_f -= d_eff
+                    cursor -= d_eff
+                    items.append(fcpxml.Dissolve(
+                        tl_off_f=cursor - d_eff // 2, dur_f=d_eff))
 
         # fade the very last picture to black
         last_video = next(it for it in reversed(items)
@@ -301,6 +308,35 @@ class Builder:
     def _full_end(self, seg: Segment) -> float:
         return max(self.angles[a].offset + self.angles[a].total_frames / self.fps
                    for a in seg.angles)
+
+    def _window(self, seg: Segment):
+        return (seg.window if seg.window
+                else [self.angles[seg.angle or seg.angles[0]].offset,
+                      self._full_end(seg)])
+
+    def _first_clip_media(self, seg: Segment):
+        """(asset_id, media_in_f) of the first clip this segment will emit, or None.
+        Mirrors how build() lays out each segment's opening clip."""
+        if seg.type == "intro":
+            ang = self.angles[seg.angle]
+            return ang.asset_ids[0], ang.start_fs[0]
+        if seg.type == "remix":
+            ws, we = self._window(seg)
+            for (aname, t0, t1) in self._shots(seg, ws, we):
+                for aid, mi, dur_f, _ra, _rb in self._subspans(
+                        self.angles[aname], t0, t1):
+                    if dur_f > 0:
+                        return aid, mi
+        return None
+
+    def _head_handle_f(self, seg: Segment) -> int:
+        """Media frames available before a segment's first visible frame — how far
+        a centred cross dissolve may reach back into the incoming clip."""
+        fc = self._first_clip_media(seg)
+        if not fc:
+            return 0
+        aid, mi = fc
+        return max(0, mi - self.assets_by_id(aid).start_f)
 
     def _shots(self, seg: Segment, ws: float, we: float):
         """Alternate angles with varied lengths; calm single-angle tail."""
