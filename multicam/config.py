@@ -49,6 +49,7 @@ class Project:
     transition_seconds: float = 1.0   # cross dissolve between segments (0 = hard cut)
     end_fade_seconds: float = 2.5     # fade to black + audio at the very end
     bed_fade_in_seconds: float = 1.0  # bed fade-in at a segment boundary
+    coach_description: str = ""       # vision-filter: describe coach clothing to avoid coach-only shots
 
 
 def load(path: str | Path) -> Project:
@@ -69,4 +70,5 @@ def load(path: str | Path) -> Project:
         transition_seconds=d.get("transition_seconds", 1.0),
         end_fade_seconds=d.get("end_fade_seconds", 2.5),
         bed_fade_in_seconds=d.get("bed_fade_in_seconds", 1.0),
+        coach_description=d.get("coach_description", ""),
     )

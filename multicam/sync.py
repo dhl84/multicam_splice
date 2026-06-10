@@ -22,6 +22,8 @@ _SR = 22050           # decode rate for flux
 _HOP = _SR // FPS
 _WIN = 1024
 
+ACT_FPS = 2.0          # video activity samples per second
+
 
 @dataclass
 class SyncResult:
@@ -67,6 +69,37 @@ def _xcorr(tmpl: np.ndarray, sig: np.ndarray) -> tuple[float, float]:
     mask[max(0, peak - FPS):peak + FPS] = False
     psr = (cc[peak] - cc[mask].mean()) / (cc[mask].std() + 1e-12)
     return lags[peak] / FPS, float(psr)
+
+
+def video_activity(files: list[Path], max_seconds: float | None = None) -> np.ndarray:
+    """Per-sample visual motion energy at ACT_FPS samples/sec (higher = more movement).
+
+    Decodes each file to a tiny greyscale raster (64×36) and returns the
+    mean absolute frame-difference signal — the same idea as spectral_flux but
+    for picture.  Near-zero values mean the camera is pointing at a static or
+    empty scene; high values mean people / action are visible.
+    """
+    parts = []
+    remaining = max_seconds
+    for p in files:
+        if remaining is not None and remaining <= 0:
+            break
+        cmd = ["ffmpeg", "-v", "error", "-i", str(p)]
+        if remaining is not None:
+            cmd += ["-t", f"{remaining:.3f}"]
+        cmd += ["-vf", f"scale=64:36,fps={ACT_FPS}",
+                "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+        raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+        n = len(raw) // (64 * 36)
+        if n:
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(n, 64 * 36).astype(np.float32)
+            parts.append(arr)
+            if remaining is not None:
+                remaining -= n / ACT_FPS
+    if not parts:
+        return np.zeros(0)
+    frames = np.concatenate(parts)
+    return np.abs(np.diff(frames, axis=0, prepend=frames[:1])).mean(axis=1)
 
 
 def sync_to_reference(ref_files: list[Path], target_files: list[Path],

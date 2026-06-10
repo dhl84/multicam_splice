@@ -1,7 +1,7 @@
 # multicam_splice
 
 Turn several camera angles of **one event** into a fun, flick-between-angles
-**FCPXML** you import into Final Cut Pro — fully local, no cloud.
+**FCPXML** you import into Final Cut Pro — fully local, no cloud required.
 
 Given clips from multiple cameras (different makes/mics/start times) it:
 
@@ -20,13 +20,26 @@ Given clips from multiple cameras (different makes/mics/start times) it:
    cleanest source plays underneath. Where that source doesn't cover a section
    (e.g. a warm-up only one camera filmed), the next-cleanest covering source is
    used there.
-5. **Polishes**: cross-dissolves between sections and a fade-to-black (picture +
+5. **Picks the best-looking shot** using two filters that run at setup time:
+   - **Video activity** (always on): decodes each angle to a tiny 64×36
+     greyscale raster at 2 fps and computes mean absolute frame-difference.
+     Angles with near-zero activity (static or empty scene) are excluded from
+     rotation unless every available angle is equally quiet.
+   - **Vision content classification** (optional, requires `ANTHROPIC_API_KEY`):
+     if `coach_description` is set in the config, thumbnail frames are sent to
+     Claude Haiku and labelled A / C / E (athletes / coach-only / empty).
+     Angles labelled coach-only are deprioritised so the edit stays on the
+     action. Both results are cached to disk (`<first-file-stem>_content_cache.npy`)
+     so re-runs are instant.
+6. **Polishes**: cross-dissolves between sections and a fade-to-black (picture +
    sound) at the end.
-6. **Outputs** a DTD-validated FCPXML (`File ▸ Import ▸ XML` makes a new project;
+7. **Outputs** a DTD-validated FCPXML (`File ▸ Import ▸ XML` makes a new project;
    your media and existing projects are untouched).
 
-Independent: only `numpy` plus `ffmpeg`/`ffprobe` on PATH. It does **not** depend
-on any other tool.
+Core dependencies: `numpy` + `ffmpeg`/`ffprobe` on PATH. The vision
+classification step additionally requires the `anthropic` package and a valid
+`ANTHROPIC_API_KEY`; without it the content filter is silently skipped (activity
+filtering still runs).
 
 ## Install / run
 
@@ -35,7 +48,7 @@ with a placeholder path), then:
 
 ```sh
 # with uv (no install needed):
-uv run --with numpy python -m multicam examples/open_261.json
+uv run python -m multicam examples/open_261.json
 
 # or install it:
 pip install -e .
@@ -78,7 +91,11 @@ A project is one JSON file (see `examples/open_261.json`):
 
   "transition_seconds": 1.0,                  // cross dissolve between segments (0 = hard cut)
   "bed_fade_in_seconds": 1.0,
-  "end_fade_seconds": 2.5                      // fade to black + audio at the end
+  "end_fade_seconds": 2.5,                    // fade to black + audio at the end
+
+  // Optional: describe who to avoid cutting to when athletes are in another angle.
+  // Requires ANTHROPIC_API_KEY. Results are cached; first run is slower.
+  "coach_description": "olive green hoodie and dark blue/black tracksuit"
 }
 ```
 
@@ -111,23 +128,62 @@ Some mics never lock — e.g. a pocket gimbal whose audio is wind/handling-noise
 dominated, or a camera filmed at a different time. Place those as an `intro`
 segment or with a manual `offset`.
 
+## How shot selection works
+
+Within a remix segment the algorithm cycles through the angle list with
+deliberately uneven step lengths (from `pattern`), then applies two filters:
+
+1. **Activity filter** (`_MIN_ACTIVITY = 2.0`): computes mean absolute
+   frame-difference (64×36 px, 2 fps) per angle over the shot window. Angles
+   below the floor are excluded; if *all* fall below (e.g. a rest between
+   rounds) the filter is bypassed and normal rotation continues.
+
+2. **Content filter** (when `coach_description` is set and classification data
+   exists): requires that the majority of sampled frames (0.5 fps, 320×180 px)
+   for an angle were labelled "A" (athletes visible) by the vision model. Angles
+   whose frames are mostly coach-only or empty are excluded; if every candidate
+   angle fails the content test the filter is bypassed.
+
+Classification results are saved next to the first media file as
+`<stem>_content_cache.npy` and loaded automatically on subsequent runs. To
+regenerate, delete the cache files and re-run with `ANTHROPIC_API_KEY` set.
+
+The helper script `make_contact_sheets.py` can pre-generate labelled contact
+sheets (20 frames per JPEG) from any angle's files for manual inspection or
+correction:
+
+```sh
+python make_contact_sheets.py /path/to/DJI_0479.MP4 /path/to/DJI_0480.MP4 \
+    --out /tmp/sheets --prefix dji --fps 0.5 --max-seconds 500
+```
+
 ## Layout
 
 - `multicam/probe.py` — ffprobe wrappers
-- `multicam/sync.py` — spectral-flux onset + cross-correlation + PSR
+- `multicam/sync.py` — spectral-flux onset + cross-correlation + PSR; video activity
 - `multicam/audio.py` — cleanliness scoring + bed pick
-- `multicam/timeline.py` — probe → sync → segment/shot layout → transitions/fades
+- `multicam/classify.py` — vision-based frame classification via Claude Haiku; cache I/O
+- `multicam/timeline.py` — probe → sync → activity/content scoring → segment/shot layout → transitions/fades
 - `multicam/fcpxml.py` — frame-accurate FCPXML emitter + DTD validation
-- `multicam/config.py` — JSON config
+- `multicam/config.py` — JSON config (`coach_description` field drives vision filter)
 - `multicam/__main__.py` — `python -m multicam <config.json>`
+- `make_contact_sheets.py` — helper: extract labelled thumbnail contact sheets for cache inspection
 - `examples/open_261.json` — a worked 3-camera example (GoPro + iPhone synced,
   a DJI warm-up as an intro); set `media_dir` to your own footage to run it
 
 ## Notes / caveats
 
-- **All local** — no network at runtime.
+- **Mostly local** — audio sync, activity scoring, and FCPXML generation all run
+  offline. Vision classification calls the Anthropic API when a cache doesn't
+  exist; set `ANTHROPIC_API_KEY` before first run if using `coach_description`.
 - FCPXML is validated against Apple's bundled DTD, but DTD-valid doesn't
   guarantee every semantic edge case — scrub transitions/fades once on import.
 - Assumes the angles share one sequence format (raster + frame rate). Mixed
   codecs are fine; mixed frame sizes/rates are not handled.
 - Sync decodes each clip's audio once; large files take a minute or two.
+- Activity and classification are capped at 600 s per angle — enough for most
+  events. Raise `max_seconds` in `setup()` for longer recordings.
+- Embedded timecode in media files is read and respected; if the first clip of
+  an angle has a non-zero start timecode and none is specified in the config, it
+  is read from the file automatically.
+</thinking>

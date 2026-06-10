@@ -12,13 +12,16 @@ one clean source, never a jumble of per-shot audio.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from . import audio, fcpxml
+from .classify import classify_content, CLASSIFY_FPS
 from .config import Project, Segment
 from .probe import MediaInfo, probe
-from .sync import spectral_flux, sync_to_reference, SyncResult
+from .sync import ACT_FPS, spectral_flux, sync_to_reference, video_activity, SyncResult
 
 
 @dataclass
@@ -31,11 +34,37 @@ class _Angle:
     cum_frames: list[int]        # cumulative frame offset of each file
     offset: float                # reference-time of this angle's t=0
     total_frames: int
+    activity: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    activity_fps: float = ACT_FPS
+    content: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int8))
+    content_fps: float = CLASSIFY_FPS
 
     def covers(self, t0: float, t1: float, fps: float, margin: float = 0.4) -> bool:
         lo = self.offset + margin
         hi = self.offset + self.total_frames / fps - margin
         return lo <= t0 and t1 <= hi
+
+    def mean_content(self, ref_t0: float, ref_t1: float) -> float:
+        """Fraction of content-classified samples in [ref_t0, ref_t1] showing athletes.
+        Returns 1.0 (assume athletes present) when no content data has been computed."""
+        if len(self.content) == 0:
+            return 1.0
+        local_t0 = max(0.0, ref_t0 - self.offset)
+        local_t1 = max(0.0, ref_t1 - self.offset)
+        i0 = min(int(local_t0 * self.content_fps), len(self.content) - 1)
+        i1 = min(max(i0 + 1, int(local_t1 * self.content_fps) + 1), len(self.content))
+        return float(self.content[i0:i1].mean())
+
+    def mean_activity(self, ref_t0: float, ref_t1: float) -> float:
+        """Average visual motion energy over the reference-time window [ref_t0, ref_t1].
+        Returns 1.0 (neutral) when no activity data has been computed."""
+        if len(self.activity) == 0:
+            return 1.0
+        local_t0 = max(0.0, ref_t0 - self.offset)
+        local_t1 = max(0.0, ref_t1 - self.offset)
+        i0 = min(int(local_t0 * self.activity_fps), len(self.activity) - 1)
+        i1 = min(max(i0 + 1, int(local_t1 * self.activity_fps) + 1), len(self.activity))
+        return float(self.activity[i0:i1].mean())
 
     def media_at(self, ref_t: float, fps: float) -> tuple[str, int]:
         """(asset_id, media_in_frame) for showing reference-time ref_t."""
@@ -72,8 +101,8 @@ class Builder:
             self._aid += 1
             aid = f"v{self._aid}"
             ids.append(aid)
-            sf, drop = fcpxml.parse_timecode(spec.timecode if inf is infos[0] else "",
-                                             self.fps_n, self.fps_d)
+            tc = (spec.timecode if inf is infos[0] else "") or inf.timecode
+            sf, drop = fcpxml.parse_timecode(tc, self.fps_n, self.fps_d)
             starts.append(sf)
             cum.append(running)
             running += inf.n_frames
@@ -108,6 +137,22 @@ class Builder:
             ang.offset = r.offset
             tag = "CONFIDENT" if r.confident else "LOW CONFIDENCE — verify/override"
             self.log(f"sync {name}: offset {r.offset:+.3f}s  PSR {r.psr:.1f}  [{tag}]")
+        # Compute video activity for all remix angles (used in shot selection to
+        # avoid cutting to angles with no one in frame).
+        for name in remix_angles:
+            ang = self.angles[name]
+            self.log(f"computing video activity for {name}...")
+            ang.activity = video_activity(ang.paths, max_seconds=600)
+        # Vision-based content classification (requires coach_description in config).
+        # Labels each sample 1=athletes or 0=no-athletes so shot selection can
+        # deprioritise coach-only frames even when they pass the activity floor.
+        if self.p.coach_description:
+            for name in remix_angles:
+                ang = self.angles[name]
+                self.log(f"classifying content for {name} (vision)...")
+                ang.content = classify_content(
+                    ang.paths, self.p.coach_description,
+                    max_seconds=600, log=self.log)
         # intro angles just need registering
         for s in self.p.segments:
             if s.type == "intro":
@@ -254,8 +299,31 @@ class Builder:
         while t < alt_end - 1e-6:
             t1 = min(t + pat[i % len(pat)], alt_end)
             order = [order_base[(cur + k) % len(order_base)] for k in range(len(order_base))]
-            pick = next((a for a in order if self.angles[a].covers(t, t1, self.fps)),
-                        order_base[0])
+            covering = [a for a in order if self.angles[a].covers(t, t1, self.fps)]
+            if covering:
+                # 1. Activity filter: exclude static/empty angles (sensor noise ~0.5–1.5).
+                #    Fall back to full set when all angles are below the floor
+                #    (e.g. a rest between rounds).
+                _MIN_ACTIVITY = 2.0
+                acts = {a: self.angles[a].mean_activity(t, t1) for a in covering}
+                best_act = max(acts.values())
+                if best_act >= _MIN_ACTIVITY:
+                    active = [a for a in covering if acts[a] >= _MIN_ACTIVITY] or covering
+                else:
+                    active = covering
+                # 2. Content filter: among active angles, prefer those where athletes
+                #    are visible over coach-only frames.  Any angle with at least one
+                #    athlete-classified sample in the window is preferred.  Falls back
+                #    to the activity-filtered set when no angle has content data or
+                #    all show coach/empty (so we never drop to zero candidates).
+                if len(active) > 1:
+                    with_athletes = [a for a in active
+                                     if self.angles[a].mean_content(t, t1) >= 0.5]
+                    if with_athletes:
+                        active = with_athletes
+                pick = next((a for a in order if a in active), active[0])
+            else:
+                pick = order_base[0]
             shots.append((pick, t, t1))
             cur = (order_base.index(pick) + 1) % len(order_base)
             t = t1; i += 1

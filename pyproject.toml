@@ -3,7 +3,11 @@ name = "multicam-splice"
 version = "0.1.0"
 description = "Splice multiple camera angles of one event into a flick-between-angles FCPXML remix for Final Cut Pro"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = [
+    "anthropic>=0.109.1",
+    "numpy>=1.24",
+    "pillow>=12.2.0",
+]
 
 [project.scripts]
 multicam-splice = "multicam.__main__:main"
