@@ -200,6 +200,22 @@ class Builder:
 
     # --- build -------------------------------------------------------------
 
+    def _subspans(self, ang: _Angle, ref_a: float, ref_b: float):
+        """Yield (asset_id, media_in_f, dur_f, ref_sub_a, ref_sub_b) split at file
+        boundaries so no single clip ever references frames past one file's end."""
+        for i in range(len(ang.asset_ids)):
+            next_cf = (ang.cum_frames[i + 1] if i + 1 < len(ang.cum_frames)
+                       else ang.total_frames)
+            t_lo = ang.offset + ang.cum_frames[i] / self.fps
+            t_hi = ang.offset + next_cf / self.fps
+            sub_a = max(ref_a, t_lo)
+            sub_b = min(ref_b, t_hi)
+            dur_f = self.f(sub_b) - self.f(sub_a)
+            if dur_f <= 0:
+                continue
+            _, mi = ang.media_at(sub_a, self.fps)
+            yield ang.asset_ids[i], mi, dur_f, sub_a, sub_b
+
     def build(self) -> fcpxml.Sequence:
         self.setup()
         items: list = []
@@ -231,30 +247,32 @@ class Builder:
                 first = None
                 for (aname, t0, t1) in shots:
                     ang = self.angles[aname]
-                    aid, mi = ang.media_at(t0, self.fps)
-                    off = seg_start + (self.f(t0) - self.f(ws))
-                    dur = self.f(t1) - self.f(t0)
-                    if dur <= 0:
-                        continue
-                    c = fcpxml.VideoClip(
-                        ref=aid, name=aname, tl_off_f=off, dur_f=dur, media_in_f=mi,
-                        src="video", mute=True)
-                    items.append(c); seg_clips.append(c)
-                    first = first or c
-                    cursor = off + dur
-                # single-source audio bed across [ws, we], anchored to first clip
+                    for aid, mi, dur_f, ref_a, _ref_b in self._subspans(ang, t0, t1):
+                        if dur_f <= 0:
+                            continue
+                        off = seg_start + (self.f(ref_a) - self.f(ws))
+                        c = fcpxml.VideoClip(
+                            ref=aid, name=aname, tl_off_f=off, dur_f=dur_f,
+                            media_in_f=mi, src="video", mute=True)
+                        items.append(c); seg_clips.append(c)
+                        first = first or c
+                        cursor = off + dur_f
+                # single-source audio bed across [ws, we], anchored to first clip.
+                # Each source angle may span multiple files; split at file boundaries
+                # so no audio asset-clip requests frames past its file's declared end.
                 bed_in = self.f(self.p.bed_fade_in_seconds) if si > 0 else 0
                 bed_out = self.f(self.p.end_fade_seconds) if is_last else 0
                 spans = self._bed_spans(seg, ws, we)
-                for j, (bname, a, b) in enumerate(spans):
-                    bang = self.angles[bname]
-                    aid, mi = bang.media_at(a, self.fps)
-                    off = seg_start + (self.f(a) - self.f(ws))
+                flat = [(bname, aid, mi, dur_f, ref_a, ref_b, j)
+                        for j, (bname, a, b) in enumerate(spans)
+                        for aid, mi, dur_f, ref_a, ref_b in self._subspans(self.angles[bname], a, b)]
+                for k, (bname, aid, mi, dur_f, ref_a, _ref_b, j) in enumerate(flat):
+                    off = seg_start + (self.f(ref_a) - self.f(ws))
                     first.anchors.append(fcpxml.AudioClip(
                         ref=aid, name=f"{bname} audio (bed)", tl_off_f=off,
-                        dur_f=self.f(b) - self.f(a), media_in_f=mi,
-                        fade_in_f=bed_in if j == 0 else 0,
-                        fade_out_f=bed_out if j == len(spans) - 1 else 0))
+                        dur_f=dur_f, media_in_f=mi,
+                        fade_in_f=bed_in if k == 0 else 0,
+                        fade_out_f=bed_out if k == len(flat) - 1 else 0))
 
             # transition into the NEXT segment: trim this segment's tail for a handle
             if D and not is_last:
