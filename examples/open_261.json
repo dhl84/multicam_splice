@@ -25,5 +25,11 @@
 
   "transition_seconds": 1.0,
   "bed_fade_in_seconds": 1.0,
-  "end_fade_seconds": 2.5
+  "end_fade_seconds": 2.5,
+
+  "cut_on_action": true,
+  "cut_snap_seconds": 0.7,
+  "punch_in": true,
+  "punch_in_scale": 1.05,
+  "punch_in_min_seconds": 4.0
 }

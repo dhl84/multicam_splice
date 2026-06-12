@@ -50,6 +50,12 @@ class Project:
     end_fade_seconds: float = 2.5     # fade to black + audio at the very end
     bed_fade_in_seconds: float = 1.0  # bed fade-in at a segment boundary
     coach_description: str = ""       # vision-filter: describe coach clothing to avoid coach-only shots
+    cut_on_action: bool = True        # snap remix cuts to nearby audio onsets (rep
+                                      # landings, beeps) so edits feel motivated
+    cut_snap_seconds: float = 0.7     # how far a cut may slide to reach an onset
+    punch_in: bool = False            # subtle slow push-in on longer shots
+    punch_in_scale: float = 1.05      # how far the push-in travels (1.05 = 5%)
+    punch_in_min_seconds: float = 4.0 # only shots at least this long get the move
 
 
 def load(path: str | Path) -> Project:
@@ -71,4 +77,9 @@ def load(path: str | Path) -> Project:
         end_fade_seconds=d.get("end_fade_seconds", 2.5),
         bed_fade_in_seconds=d.get("bed_fade_in_seconds", 1.0),
         coach_description=d.get("coach_description", ""),
+        cut_on_action=d.get("cut_on_action", True),
+        cut_snap_seconds=d.get("cut_snap_seconds", 0.7),
+        punch_in=d.get("punch_in", False),
+        punch_in_scale=d.get("punch_in_scale", 1.05),
+        punch_in_min_seconds=d.get("punch_in_min_seconds", 4.0),
     )

@@ -21,7 +21,8 @@ from . import audio, fcpxml
 from .classify import classify_content, CLASSIFY_FPS
 from .config import Project, Segment
 from .probe import MediaInfo, probe
-from .sync import ACT_FPS, spectral_flux, sync_to_reference, video_activity, SyncResult
+from .sync import (ACT_FPS, onset_threshold, snap_to_onset, spectral_flux,
+                   sync_to_reference, video_activity, SyncResult)
 
 
 @dataclass
@@ -83,6 +84,8 @@ class Builder:
         self._aid = 0
         self.angles: dict[str, _Angle] = {}
         self.assets: list[fcpxml.Asset] = []
+        self._ref_flux: np.ndarray | None = None   # reference onset function
+        self._onset_thr: float = float("inf")      # flux level that counts as an onset
 
     def f(self, sec: float) -> int:
         return round(sec * self.fps_n / self.fps_d)
@@ -137,6 +140,14 @@ class Builder:
             ang.offset = r.offset
             tag = "CONFIDENT" if r.confident else "LOW CONFIDENCE — verify/override"
             self.log(f"sync {name}: offset {r.offset:+.3f}s  PSR {r.psr:.1f}  [{tag}]")
+        # cut-on-action reuses the reference onset function the sync computed;
+        # when every angle was placed manually, compute it here instead.
+        if self.p.cut_on_action and remix_angles:
+            if ref_flux is None:
+                self.log("computing reference spectral flux (cut-on-action)...")
+                ref_flux = spectral_flux(ref.paths)
+            self._ref_flux = ref_flux
+            self._onset_thr = onset_threshold(ref_flux)
         # Compute video activity for all remix angles (used in shot selection to
         # avoid cutting to angles with no one in frame).
         for name in remix_angles:
@@ -243,15 +254,26 @@ class Builder:
                 ws, we = self._window(seg)
                 shots = self._shots(seg, ws, we)
                 first = None
-                for (aname, t0, t1) in shots:
+                eligible_i = 0
+                for shot_i, (aname, t0, t1) in enumerate(shots):
                     ang = self.angles[aname]
-                    for aid, mi, dur_f, ref_a, _ref_b in self._subspans(ang, t0, t1):
-                        if dur_f <= 0:
-                            continue
+                    subs = [sub for sub in self._subspans(ang, t0, t1) if sub[2] > 0]
+                    # Subtle slow push-in (punch_in_scale over the whole shot) on
+                    # every other long-enough shot, and on the calm tail — variety
+                    # without flash. Skipped when a shot straddles a file boundary
+                    # (the move would restart mid-shot).
+                    is_tail = shot_i == len(shots) - 1 and len(shots) > 1
+                    eligible = (self.p.punch_in and len(subs) == 1
+                                and (t1 - t0) >= self.p.punch_in_min_seconds)
+                    push = eligible and (is_tail or eligible_i % 2 == 1)
+                    if eligible:
+                        eligible_i += 1
+                    for aid, mi, dur_f, ref_a, _ref_b in subs:
                         off = seg_start + (self.f(ref_a) - self.f(ws))
                         c = fcpxml.VideoClip(
                             ref=aid, name=aname, tl_off_f=off, dur_f=dur_f,
-                            media_in_f=mi, src="video", mute=True)
+                            media_in_f=mi, src="video", mute=True,
+                            punch_scale=self.p.punch_in_scale if push else 0.0)
                         items.append(c); seg_clips.append(c)
                         first = first or c
                         cursor = off + dur_f
@@ -338,20 +360,39 @@ class Builder:
         aid, mi = fc
         return max(0, mi - self.assets_by_id(aid).start_f)
 
+    def _cut_points(self, ws: float, alt_end: float, pat: list[float]) -> list[float]:
+        """Cut times across [ws, alt_end): the pattern's uneven lengths, with each
+        interior cut slid to the strongest nearby audio onset (a rep landing, a
+        beep) when cut_on_action is on — cuts land ON the action instead of on a
+        metronome. A cut only snaps if it keeps at least 1.5 s of shot on both
+        sides, so two cuts can never collapse onto one onset."""
+        bounds, t, i = [ws], ws, 0
+        while t < alt_end - 1e-6:
+            t1 = min(t + pat[i % len(pat)], alt_end)
+            if (self._ref_flux is not None and t1 < alt_end - 0.5):
+                snapped = snap_to_onset(self._ref_flux, t1,
+                                        self.p.cut_snap_seconds, self._onset_thr)
+                if snapped - bounds[-1] >= 1.5 and snapped <= alt_end - 0.5:
+                    t1 = snapped
+            bounds.append(t1)
+            t = t1
+            i += 1
+        return bounds
+
     def _shots(self, seg: Segment, ws: float, we: float):
-        """Alternate angles with varied lengths; calm single-angle tail."""
-        pat = seg.pattern
+        """Alternate angles with varied (onset-snapped) lengths; calm single-angle
+        tail."""
         # last reference-time at which more than one angle still covers
         multi_end = we
         if seg.tail_single_angle and len(seg.angles) > 1:
             ends = sorted(self.angles[a].offset + self.angles[a].total_frames / self.fps
                           for a in seg.angles)
             multi_end = min(we, ends[-2] - 0.4)        # 2nd-latest angle runs out
-        shots, t, i, cur = [], ws, 0, 0
+        shots, cur = [], 0
         order_base = list(seg.angles)
         alt_end = min(we, multi_end)
-        while t < alt_end - 1e-6:
-            t1 = min(t + pat[i % len(pat)], alt_end)
+        bounds = self._cut_points(ws, alt_end, seg.pattern)
+        for t, t1 in zip(bounds, bounds[1:]):
             order = [order_base[(cur + k) % len(order_base)] for k in range(len(order_base))]
             covering = [a for a in order if self.angles[a].covers(t, t1, self.fps)]
             if covering:
@@ -380,7 +421,6 @@ class Builder:
                 pick = order_base[0]
             shots.append((pick, t, t1))
             cur = (order_base.index(pick) + 1) % len(order_base)
-            t = t1; i += 1
         if we - alt_end > 0.1:
             # one calm shot from whichever angle covers the tail (prefer reference)
             tail = next((a for a in [self.p.reference] + order_base

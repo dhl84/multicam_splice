@@ -71,6 +71,36 @@ def _xcorr(tmpl: np.ndarray, sig: np.ndarray) -> tuple[float, float]:
     return lags[peak] / FPS, float(psr)
 
 
+def onset_threshold(flux: np.ndarray, sigmas: float = 4.0) -> float:
+    """A flux level that counts as a 'real' onset. The flux is mostly ~0 (it is
+    median-subtracted) with sparse sharp spikes at true onsets, so mean + 4·std
+    sits well above the noise floor and below genuine hits — cuts only snap to
+    clearly strong events and otherwise keep their pattern position."""
+    if len(flux) == 0:
+        return float("inf")
+    return float(flux.mean() + sigmas * flux.std())
+
+
+def snap_to_onset(flux: np.ndarray, t: float, window_s: float,
+                  threshold: float) -> float:
+    """Slide a proposed cut time t (seconds on the flux timeline) to the
+    strongest audio onset within ±window_s — a rep landing, a beep, a shout —
+    so the cut lands ON the action. Returns t unchanged when no onset in the
+    window clears `threshold` (keep the metronome rather than snap to noise)."""
+    if len(flux) == 0 or window_s <= 0:
+        return t
+    i = round(t * FPS)
+    w = round(window_s * FPS)
+    lo, hi = max(0, i - w), min(len(flux), i + w + 1)
+    if hi <= lo:
+        return t
+    win = flux[lo:hi]
+    peak = int(np.argmax(win))
+    if win[peak] < threshold:
+        return t
+    return (lo + peak) / FPS
+
+
 def video_activity(files: list[Path], max_seconds: float | None = None) -> np.ndarray:
     """Per-sample visual motion energy at ACT_FPS samples/sec (higher = more movement).
 

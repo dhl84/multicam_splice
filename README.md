@@ -13,7 +13,10 @@ Given clips from multiple cameras (different makes/mics/start times) it:
    the clips don't share audio (e.g. they were filmed at non-overlapping times)
    and you should place that angle manually.
 3. **Splices** a remix: the spine flicks between angles with deliberately uneven
-   shot lengths, keeping the whole covered span — nothing is dropped.
+   shot lengths, keeping the whole covered span — nothing is dropped. With
+   `cut_on_action` (default on) each cut snaps to the strongest nearby audio
+   onset — a rep landing, a beep — so the edit cuts *on* the action; with
+   `punch_in` longer shots get a subtle slow push-in for variety.
 4. **Keeps the audio on one clean source.** Every spliced clip's own audio is
    force-muted (`srcEnable=video` **and** `adjust-volume -96dB`, the latter
    honoured by every FCP version), and a single continuous **audio bed** from the
@@ -98,6 +101,12 @@ A project is one JSON file (see `examples/open_261.json`):
   "bed_fade_in_seconds": 1.0,
   "end_fade_seconds": 2.5,                    // fade to black + audio at the end
 
+  "cut_on_action": true,                      // snap remix cuts to nearby audio onsets
+  "cut_snap_seconds": 0.7,                    // how far a cut may slide to reach one
+  "punch_in": true,                           // subtle slow push-in on longer shots
+  "punch_in_scale": 1.05,                     // how far the push travels (5%)
+  "punch_in_min_seconds": 4.0,                // only shots at least this long
+
   // Optional: describe who to avoid cutting to when athletes are in another angle.
   // Requires ANTHROPIC_API_KEY. Results are cached; first run is slower.
   "coach_description": "olive green hoodie and dark blue/black tracksuit"
@@ -136,7 +145,20 @@ segment or with a manual `offset`.
 ## How shot selection works
 
 Within a remix segment the algorithm cycles through the angle list with
-deliberately uneven step lengths (from `pattern`), then applies two filters:
+deliberately uneven step lengths (from `pattern`). With `cut_on_action` on
+(the default), each cut point then slides up to `cut_snap_seconds` to the
+strongest audio onset nearby — a rep landing, a beep, a shout — so cuts land
+*on* the action the way an editor would place them, instead of on a metronome.
+The onset function is the same spectral flux already computed for sync, and a
+cut only snaps to a clearly strong event (mean + 4σ of the flux) that keeps at
+least 1.5 s of shot on both sides; otherwise it stays at its pattern position.
+
+With `punch_in` on, every other shot longer than `punch_in_min_seconds` (and
+the calm single-angle tail) gets a slow push-in from 100% to `punch_in_scale`
+across the shot — gentle variety from the same camera positions, not an effect
+you consciously notice. Shots that straddle a file boundary are skipped.
+
+After the cut points are fixed, two filters pick the angle for each shot:
 
 1. **Activity filter** (`_MIN_ACTIVITY = 2.0`): computes mean absolute
    frame-difference (64×36 px, 2 fps) per angle over the shot window. Angles
@@ -191,4 +213,3 @@ python make_contact_sheets.py /path/to/DJI_0479.MP4 /path/to/DJI_0480.MP4 \
 - Embedded timecode in media files is read and respected; if the first clip of
   an angle has a non-zero start timecode and none is specified in the config, it
   is read from the file automatically.
-</thinking>

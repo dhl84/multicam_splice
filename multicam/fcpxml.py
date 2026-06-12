@@ -104,6 +104,7 @@ class VideoClip:
     src: str = "all"             # 'all' keeps own audio; 'video' = picture only
     mute: bool = False           # force own audio to -96dB (reliable across FCP)
     opacity_fade_out_f: int = 0  # fade picture to black over the last N frames
+    punch_scale: float = 0.0     # >1: slow push-in from 1.0 to this over the clip
     anchors: list[AudioClip] = field(default_factory=list)
 
 
@@ -181,7 +182,16 @@ def build(seq: Sequence, out_path: Path) -> Path:
                              offset=t.f(it.tl_off_f), name=it.name,
                              duration=t.f(it.dur_f), start=t.f(it.media_in_f),
                              tcFormat=it.tcfmt, srcEnable=it.src)
-        # intrinsic-params: video (opacity fade) THEN audio (mute) per the DTD
+        # intrinsic-params: video (transform, then opacity fade) THEN audio (mute)
+        # per the DTD. Keyframe times are in the clip's source timebase, the same
+        # coordinate as its `start`.
+        if it.punch_scale > 1.0:
+            at = ET.SubElement(clip, "adjust-transform")
+            ps = ET.SubElement(at, "param", name="scale")
+            ka = ET.SubElement(ps, "keyframeAnimation")
+            ET.SubElement(ka, "keyframe", time=t.f(it.media_in_f), value="1 1")
+            ET.SubElement(ka, "keyframe", time=t.f(it.media_in_f + it.dur_f),
+                          value=f"{it.punch_scale:g} {it.punch_scale:g}")
         if it.opacity_fade_out_f:
             ab = ET.SubElement(clip, "adjust-blend")
             _fade(ab, "fadeOut", it.opacity_fade_out_f, t, "easeInOut")
