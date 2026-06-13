@@ -124,9 +124,12 @@ A project is one JSON file (see `examples/open_261.json`):
 
 ### Audio
 
-`audio_bed: "auto"` measures each remix angle (level + clipping via
-`volumedetect`) and beds the cleanest one, falling back to the next-cleanest in
-any span the first doesn't cover. Force a choice with `"audio_bed": "iPhone"`.
+`audio_bed: "auto"` measures each remix angle with ffmpeg's `loudnorm` in EBU
+R128 analysis mode — integrated loudness (LUFS), true-peak (dBTP), and loudness
+range (LRA) — and beds the cleanest one (a healthy level with peak headroom and
+stable dynamics), falling back to the next-cleanest in any span the first
+doesn't cover. Force a choice with `"audio_bed": "iPhone"`. (True-peak catches
+inter-sample clipping that a raw 0-dBFS sample count misses.)
 
 ## How sync works
 

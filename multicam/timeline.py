@@ -182,8 +182,9 @@ class Builder:
             stats = {n: audio.measure(self.angles[n].paths[0], n) for n in cands}
             cands.sort(key=lambda n: stats[n].score)
             self.log("audio bed cleanliness (lower=better): "
-                     + ", ".join(f"{n} {stats[n].score:.0f}"
-                                 f"(clip {stats[n].clip_samples})" for n in cands))
+                     + ", ".join(f"{n} {stats[n].score:.0f} "
+                                 f"({stats[n].lufs:.0f} LUFS, TP {stats[n].true_peak:.1f})"
+                                 for n in cands))
         self.log(f"audio bed priority: {cands}")
 
         spans, t, step = [], ws, 0.2
