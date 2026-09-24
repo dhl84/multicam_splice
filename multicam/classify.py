@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -49,9 +50,32 @@ def _extract_jpegs(files: list[Path], fps: float,
     return frames
 
 
-def _cache_path(files: list[Path]) -> Path:
-    """Deterministic cache file path derived from the first file's location."""
-    return files[0].parent / (files[0].stem + "_content_cache.npy")
+def _cache_key(files: list[Path], coach_description: str, model: str,
+               fps: float, max_seconds: float | None) -> str:
+    """Short deterministic digest of every input that changes the labels.
+
+    Folds in each file's name/size/mtime (so editing or swapping footage
+    invalidates), the file ordering, the coach description, the model, the
+    sample rate, and the analysed duration. Any meaningful change yields a new
+    cache file; an identical rerun reuses the old one."""
+    h = hashlib.sha1()
+    for p in files:                       # ordered: reordering changes the key
+        try:
+            st = p.stat()
+            stamp = f"{st.st_size}:{int(st.st_mtime)}"
+        except OSError:
+            stamp = "missing"
+        h.update(f"{p.name}|{stamp}\n".encode())
+    h.update(f"coach={coach_description}\nmodel={model}\n"
+             f"fps={fps}\nmax={max_seconds}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def _cache_path(files: list[Path], coach_description: str, model: str,
+                fps: float, max_seconds: float | None) -> Path:
+    """Deterministic cache path next to the first file, keyed by all inputs."""
+    key = _cache_key(files, coach_description, model, fps, max_seconds)
+    return files[0].parent / f"{files[0].stem}_content_{key}.npy"
 
 
 def classify_content(
@@ -67,7 +91,7 @@ def classify_content(
     (assume athletes present) on any API failure so shot-selection degrades
     gracefully to the activity-only filter.
     """
-    cache = _cache_path(files)
+    cache = _cache_path(files, coach_description, _MODEL, fps, max_seconds)
     if cache.exists():
         data = np.load(cache)
         log(f"  loaded content cache ({len(data)} samples) from {cache.name}")

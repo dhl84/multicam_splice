@@ -32,27 +32,69 @@ class SyncResult:
     confident: bool
 
 
-def _decode_mono(path: Path, sr: int) -> np.ndarray:
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "a:0", "-ac", "1",
-         "-ar", str(sr), "-f", "f32le", "-"],
-        capture_output=True, check=True).stdout
-    return np.frombuffer(raw, dtype=np.float32)
+# Samples pulled from ffmpeg per read (~12 s at _SR). Bounds the live frame
+# buffer so flux extraction never holds more than this many samples' worth of
+# FFT frames at once, independent of total recording length.
+_STREAM_BLOCK = 1 << 18
 
 
-def _concat(files: list[Path], sr: int) -> np.ndarray:
-    return np.concatenate([_decode_mono(Path(f), sr) for f in files])
+def _stream_mono(files: list[Path], sr: int):
+    """Yield float32 mono blocks across all files as one continuous stream,
+    decoding incrementally so the whole recording is never held in RAM."""
+    for f in files:
+        proc = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-i", str(Path(f)), "-map", "a:0",
+             "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            while True:
+                raw = proc.stdout.read(_STREAM_BLOCK * 4)
+                if not raw:
+                    break
+                yield np.frombuffer(raw, dtype=np.float32)
+        finally:
+            proc.stdout.close()
+            if proc.wait() not in (0, None):
+                raise subprocess.CalledProcessError(proc.returncode, "ffmpeg")
 
 
 def spectral_flux(files: list[Path]) -> np.ndarray:
-    x = _concat(files, _SR)
-    n = (len(x) - _WIN) // _HOP
-    if n <= 0:
+    """Spectral-flux onset function over all `files` treated as one recording.
+
+    Streams the audio in blocks and reduces each to its (small) per-hop flux
+    contribution, so peak memory is one block of FFT frames — not the whole
+    decoded signal and frame-index matrix. The result is bit-for-bit equivalent
+    to a single-shot FFT over the concatenated signal: blocks carry the tail
+    samples needed for the next frame and the previous frame's spectrum for the
+    cross-block difference, so frame alignment and the inter-frame diff are
+    identical regardless of block boundaries."""
+    win = np.hanning(_WIN)
+    buf = np.zeros(0, dtype=np.float32)
+    prev_logmag: np.ndarray | None = None
+    flux_parts: list[np.ndarray] = []
+    for block in _stream_mono(files, _SR):
+        buf = block if buf.size == 0 else np.concatenate([buf, block])
+        if len(buf) < _WIN:
+            continue
+        nfr = (len(buf) - _WIN) // _HOP + 1
+        idx = np.arange(_WIN)[None, :] + _HOP * np.arange(nfr)[:, None]
+        frames = buf[idx] * win
+        logmag = np.log1p(np.abs(np.fft.rfft(frames, axis=1)))
+        prepend = (prev_logmag[None, :] if prev_logmag is not None
+                   else logmag[:1])
+        diff = np.diff(logmag, axis=0, prepend=prepend)
+        flux_parts.append(np.maximum(diff, 0.0).sum(axis=1))
+        prev_logmag = logmag[-1]
+        buf = buf[nfr * _HOP:]                  # keep the next frame's lead-in
+    if not flux_parts:
         return np.zeros(0)
-    idx = np.arange(_WIN)[None, :] + _HOP * np.arange(n)[:, None]
-    frames = x[idx] * np.hanning(_WIN)
-    logmag = np.log1p(np.abs(np.fft.rfft(frames, axis=1)))
-    flux = np.maximum(np.diff(logmag, axis=0, prepend=logmag[:1]), 0.0).sum(axis=1)
+    flux = np.concatenate(flux_parts)           # small: ~FPS samples/sec
+    # The single-shot reference omits the final fitting frame (it uses
+    # floor((L-WIN)/HOP) frames, not +1); drop our extra tail frame so the flux
+    # array — and therefore every offset/PSR downstream — is identical.
+    flux = flux[:-1]
+    if len(flux) == 0:
+        return np.zeros(0)
     med = np.convolve(flux, np.ones(200) / 200, mode="same")
     return np.maximum(flux - med, 0.0)
 

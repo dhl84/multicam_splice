@@ -76,6 +76,9 @@ class Asset:
     start_f: int                 # media start (timecode) in frames
     dur_f: int
     tcfmt: str = "NDF"
+    has_audio: bool = True       # emit audio metadata only when the source has it
+    audio_channels: int = 0      # actual channel count from the probe (0 = unknown)
+    audio_rate: int = 0          # actual sample rate (Hz) from the probe (0 = unknown)
 
 
 @dataclass
@@ -152,11 +155,21 @@ def build(seq: Sequence, out_path: Path) -> Path:
         ET.SubElement(resources, "effect", id="rDis", name="Cross Dissolve",
                       uid=_CROSS_DISSOLVE_UID)
     for a in seq.assets:
-        asset = ET.SubElement(resources, "asset", id=a.id, name=a.name,
-                              start=t.f(a.start_f), duration=t.f(a.dur_f),
-                              hasVideo="1", hasAudio="1", format="r1",
-                              videoSources="1", audioSources="1",
-                              audioChannels="2", audioRate="48000")
+        attrs = {"id": a.id, "name": a.name, "start": t.f(a.start_f),
+                 "duration": t.f(a.dur_f), "hasVideo": "1", "format": "r1",
+                 "videoSources": "1"}
+        # Only claim audio when the source actually has it, and report its real
+        # channel count / sample rate — never a fabricated stereo/48 kHz. When a
+        # field is unknown (0) it is omitted rather than guessed.
+        if a.has_audio:
+            attrs.update(hasAudio="1", audioSources="1")
+            if a.audio_channels > 0:
+                attrs["audioChannels"] = str(a.audio_channels)
+            if a.audio_rate > 0:
+                attrs["audioRate"] = str(a.audio_rate)
+        else:
+            attrs["hasAudio"] = "0"
+        asset = ET.SubElement(resources, "asset", **attrs)
         ET.SubElement(asset, "media-rep", kind="original-media",
                       src=file_url(a.path))
 
